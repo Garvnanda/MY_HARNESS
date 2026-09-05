@@ -20,10 +20,11 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 import router
-from harness_db import init_db, iso as _iso, usage_summary
+from harness_db import init_db, iso as _iso, usage_by_pool, usage_summary
 
 # --------------------------------------------------------------------------- config
 
@@ -94,11 +95,12 @@ def set_task_status(task_id, status, *, completed=False) -> None:
         DB.commit()
 
 
-def record_usage(role, cost_usd, duration_ms, call_type) -> None:
+def record_usage(role, cost_usd, duration_ms, call_type, units=None, unit_kind=None) -> None:
     with LOCK:
         DB.execute(
-            "INSERT INTO usage_ledger(terminal_role,ts,cost_usd,duration_ms,call_type) VALUES (?,?,?,?,?)",
-            (role, time.time(), cost_usd, duration_ms, call_type),
+            "INSERT INTO usage_ledger(terminal_role,ts,cost_usd,duration_ms,call_type,units,unit_kind) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (role, time.time(), cost_usd, duration_ms, call_type, units, unit_kind),
         )
         DB.commit()
 
@@ -275,7 +277,8 @@ async def on_review_result(frame: dict) -> None:
                 resolve_working_dir(worker_role) if worker_role else str(_BASE),
                 CFG.get("test_cmd", "python -m unittest"),
             )
-            record_usage("router", None, rv.get("duration_ms"), "router_review")
+            record_usage("router", rv.get("cost"), rv.get("duration_ms"), "router_review",
+                         units=rv.get("tokens"), unit_kind="tokens")
             log_event("router", "router_review_used", {"task_id": task_id, "verdict": rv["verdict"]})
             await _apply_verdict(task_id, worker_role, cycles, rv["verdict"], rv["feedback"],
                                  source="router")
@@ -320,7 +323,8 @@ async def on_docs_result(frame: dict) -> None:
                 if target.parent == wd.resolve() and target.suffix == ".md":
                     target.write_text(text, encoding="utf-8")
                     written.append(name)
-            record_usage("router", None, rd.get("duration_ms"), "router_docs")
+            record_usage("router", rd.get("cost"), rd.get("duration_ms"), "router_docs",
+                         units=rd.get("tokens"), unit_kind="tokens")
             log_event("router", "router_docs_used", {"task_id": task_id, "files": written})
             set_task_status(task_id, "done", completed=True)
             await push_to_head({"type": "event", "event": "docs_updated",
@@ -345,8 +349,11 @@ async def handle_frame(role: str, frame: dict) -> None:
         log_event(role, "progress", frame)
     elif kind == "result":
         log_event(role, "result", frame)
+        _units = frame.get("tokens") or frame.get("premium_requests")
         record_usage(role, frame.get("total_cost_usd"), frame.get("duration_ms"),
-                     frame.get("call_type", "dispatch"))
+                     frame.get("call_type", "dispatch"), units=_units,
+                     unit_kind=("tokens" if frame.get("tokens")
+                                else "credits" if frame.get("premium_requests") else None))
         if role == "reviewer":
             await on_review_result(frame)
         elif role == "docs":
@@ -423,7 +430,34 @@ def state():
 
 @app.get("/usage")
 def usage():
-    return usage_summary(DB, CFG.get("usage_limits", {}))
+    return {**usage_summary(DB, CFG.get("usage_limits", {})), "by_pool": usage_by_pool(DB)}
+
+
+@app.get("/")
+def dashboard():
+    return HTMLResponse((Path(__file__).with_name("dashboard.html")).read_text(encoding="utf-8"))
+
+
+@app.get("/events")
+def events(limit: int = 120, role: str | None = None, after: int | None = None):
+    limit = max(1, min(limit, 1000))
+    where, params = [], []
+    if role:
+        where.append("terminal = ?")
+        params.append(role)
+    if after is not None:
+        where.append("id > ?")
+        params.append(after)
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    order = "ASC" if after is not None else "DESC"
+    rows = DB.execute(
+        f"SELECT id, ts, terminal, event_type, payload FROM event_log {clause} "
+        f"ORDER BY id {order} LIMIT ?", (*params, limit),
+    ).fetchall()
+    out = [{"id": r["id"], "ts": r["ts"], "iso": _iso(r["ts"]), "terminal": r["terminal"],
+            "event_type": r["event_type"], "payload_short": (r["payload"] or "")[:160]}
+           for r in rows]
+    return out if after is not None else out[::-1]
 
 
 @app.get("/tasks/{task_id}")

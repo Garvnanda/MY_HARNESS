@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from coordinator import init_db, usage_summary  # noqa: E402
+from coordinator import init_db, usage_by_pool, usage_summary  # noqa: E402
 
 NOW = 1_000_000.0
 LIMITS = {"calls_per_5h": 45, "duration_hours_per_7d": 40}
@@ -52,6 +52,46 @@ class UsageSummary(unittest.TestCase):
         self.assertEqual(s["calls_5h"], 0)
         self.assertEqual(s["duration_7d_ms"], 0)
         self.assertFalse(s["near_limit"])
+
+
+def seed_full(rows):
+    """rows: (role, ts, cost_usd, duration_ms, call_type, units, unit_kind)"""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    conn.executemany(
+        "INSERT INTO usage_ledger(terminal_role,ts,cost_usd,duration_ms,call_type,units,unit_kind) "
+        "VALUES (?,?,?,?,?,?,?)", rows)
+    conn.commit()
+    return conn
+
+
+class UsageByPool(unittest.TestCase):
+    def test_pools_aggregate_by_role(self):
+        conn = seed_full([
+            ("head", NOW, 0.10, 1000, "head_turn", None, None),
+            ("backend", NOW, 0.20, 2000, "dispatch", None, None),
+            ("reviewer", NOW, None, 5000, "review", 89000, "tokens"),
+            ("reviewer", NOW, None, 4000, "review", 11000, "tokens"),
+            ("docs", NOW, None, 20000, "docs", 1, "credits"),
+            ("router", NOW, 0.05, 3000, "router_review", 4200, "tokens"),
+        ])
+        p = usage_by_pool(conn, now=NOW)
+        self.assertAlmostEqual(p["claude"]["cost_usd"], 0.30)
+        self.assertEqual(p["claude"]["calls"], 2)
+        self.assertEqual(p["gemini"]["units"], 100000)
+        self.assertEqual(p["gemini"]["unit_kind"], "tokens")
+        self.assertEqual(p["copilot"]["units"], 1)
+        self.assertEqual(p["copilot"]["unit_kind"], "credits")
+        self.assertEqual(p["router"]["units"], 4200)
+        self.assertAlmostEqual(p["router"]["cost_usd"], 0.05)
+
+    def test_empty(self):
+        p = usage_by_pool(seed_full([]), now=NOW)
+        for pool in ("claude", "gemini", "copilot", "router"):
+            self.assertEqual(p[pool]["calls"], 0)
+            self.assertIsNone(p[pool]["units"])
+            self.assertIsNone(p[pool]["cost_usd"])
 
 
 if __name__ == "__main__":

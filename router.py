@@ -102,6 +102,7 @@ def route_review(instructions: str, working_dir: str, test_cmd: str) -> dict:
     verdict = v.get("verdict") if v.get("verdict") in ("pass", "fail") else "fail"
     return {"verdict": verdict, "feedback": v.get("feedback") or out["text"][:800],
             "source": "router", "tokens": out["usage"].get("total_tokens"),
+            "cost": out["usage"].get("cost") or out["usage"].get("total_cost"),
             "duration_ms": out["duration_ms"]}
 
 
@@ -120,4 +121,5 @@ def route_docs(instructions: str, files: dict[str, str]) -> dict:
     if not isinstance(result, dict):
         raise ValueError(f"route_docs: could not parse file map: {out['text'][:300]}")
     return {"files": {k: v for k, v in result.items() if isinstance(v, str)},
-            "duration_ms": out["duration_ms"], "tokens": out["usage"].get("total_tokens")}
+            "duration_ms": out["duration_ms"], "tokens": out["usage"].get("total_tokens"),
+            "cost": out["usage"].get("cost") or out["usage"].get("total_cost")}

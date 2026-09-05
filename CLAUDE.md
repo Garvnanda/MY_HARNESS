@@ -71,8 +71,12 @@ lists them. Run everything from the repo root.
 - **Talk to Head without the terminal** (e.g. from a script): `POST /head_say {"text": "..."}`.
 - **Low-level dispatch** (bypasses Head): `python tools/dispatch.py backend "<instructions>"`;
   follow-up into the same session: `python tools/dispatch.py backend "<instructions>" <task_id>`.
-- **Inspect state**: `curl 127.0.0.1:8765/state` (terminals, tasks, `ready_to_commit`,
-  `head_connected`), `curl 127.0.0.1:8765/usage`, `curl 127.0.0.1:8765/tasks/<id>`, or
+- **Dashboard**: open `http://127.0.0.1:8765/` in a browser while the coordinator runs —
+  terminal grid, task queue, per-pool usage, live event log, ready-to-commit banner.
+  Polls `/state` + `/usage` + `/events` every 2s; no build step, no extra process.
+- **Inspect state (raw)**: `curl 127.0.0.1:8765/state` (terminals, tasks, `ready_to_commit`,
+  `head_connected`), `curl 127.0.0.1:8765/usage` (adds `by_pool`), `curl
+  127.0.0.1:8765/events?limit=50&role=<opt>`, `curl 127.0.0.1:8765/tasks/<id>`, or
   `sqlite3 harness_state.db "select * from event_log"`.
 
 Phase-2 demo workspace is `demo/` (gitignored); `project_config.json` points `backend` there.

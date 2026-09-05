@@ -34,7 +34,9 @@ CREATE TABLE IF NOT EXISTS usage_ledger (
     ts            REAL NOT NULL,
     cost_usd      REAL,
     duration_ms   INTEGER,
-    call_type     TEXT NOT NULL
+    call_type     TEXT NOT NULL,
+    units         REAL,
+    unit_kind     TEXT
 );
 CREATE TABLE IF NOT EXISTS event_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,6 +83,37 @@ def usage_summary(conn: sqlite3.Connection, limits: dict, now: float | None = No
         "duration_hours_per_7d": hours_per_7d,
         "near_limit": bool(near_limit),
     }
+
+
+_POOL_ROLES = {
+    "claude": ("head", "backend", "frontend"),
+    "gemini": ("reviewer",),
+    "copilot": ("docs",),
+    "router": ("router",),
+}
+
+
+def usage_by_pool(conn: sqlite3.Connection, now: float | None = None) -> dict:
+    """Per-budget-pool totals for the dashboard (implementation.md sec 7). Degrades
+    gracefully -- only reports what each engine actually gave us."""
+    # ponytail: fixed role->pool map; extend when frontend / other engines land.
+    out = {}
+    for pool, roles in _POOL_ROLES.items():
+        qmarks = ",".join("?" * len(roles))
+        row = conn.execute(
+            f"SELECT COUNT(*) c, COALESCE(SUM(cost_usd),0) cost, "
+            f"COALESCE(SUM(duration_ms),0) dur, COALESCE(SUM(units),0) units, "
+            f"MAX(unit_kind) kind FROM usage_ledger WHERE terminal_role IN ({qmarks})",
+            roles,
+        ).fetchone()
+        out[pool] = {
+            "calls": row["c"],
+            "cost_usd": round(row["cost"], 6) if row["cost"] else None,
+            "duration_ms": row["dur"] or None,
+            "units": row["units"] or None,
+            "unit_kind": row["kind"],
+        }
+    return out
 
 
 def iso(ts) -> str | None:
