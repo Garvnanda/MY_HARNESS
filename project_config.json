@@ -7,6 +7,7 @@
   "roles": {
     "head": { "engine": "claude", "mcp_config": "harness_tools.json" },
     "backend": { "engine": "claude", "working_dir": "demo" },
-    "reviewer": { "engine": "agy", "model": "gemini-3.8-flash-low" }
+    "reviewer": { "engine": "agy", "model": "gemini-3.8-flash-low" },
+    "docs": { "engine": "copilot", "working_dir": "demo", "model": "auto" }
   }
 }

@@ -8,6 +8,7 @@ Env:  HARNESS_CONFIG=path/to/project_config.json  (default: ./project_config.jso
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -21,6 +22,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
+import router
 from harness_db import init_db, iso as _iso, usage_summary
 
 # --------------------------------------------------------------------------- config
@@ -159,7 +161,8 @@ async def _send_worker_frame(role: str, task_id: str, instructions: str, *, foll
         return False
     rc = CFG["roles"][role]
     frame = {"task_id": task_id, "instructions": instructions,
-             "working_dir": resolve_working_dir(role), "engine": rc.get("engine", "claude")}
+             "working_dir": resolve_working_dir(role), "engine": rc.get("engine", "claude"),
+             "model": rc.get("model")}
     if followup:
         row = DB.execute("SELECT current_session_id FROM terminals WHERE role=?", (role,)).fetchone()
         frame["type"] = "followup"
@@ -191,13 +194,18 @@ def _reviewer_available() -> bool:
     return "reviewer" in CONNS and "reviewer" in CFG.get("roles", {})
 
 
+# roles whose "done" must NOT trigger a code review: Head/Reviewer never call it,
+# Docs edits markdown not code.
+_NO_REVIEW_ROLES = ("head", "reviewer", "docs")
+
+
 async def on_worker_done(task_id: str | None, result: dict) -> None:
     """A worker finished. Auto-dispatch the Reviewer (impl.md sec 3); only fall
     through to Head directly when no reviewer is running."""
     role = result.get("role")
     log_event(role, "task_done", {"task_id": task_id, "session_id": result.get("session_id")})
 
-    if task_id and role and role not in ("head", "reviewer") and _reviewer_available():
+    if task_id and role and role not in _NO_REVIEW_ROLES and _reviewer_available():
         set_task_status(task_id, "in_review")
         await dispatch_review(task_id, role, result.get("session_id"))
         return
@@ -209,54 +217,123 @@ async def on_worker_done(task_id: str | None, result: dict) -> None:
                             "task_id": task_id, "role": role, "outcome": "done"})
 
 
+async def _apply_verdict(task_id, worker_role, cycles, verdict, feedback, *, source="reviewer") -> None:
+    with LOCK:
+        DB.execute("UPDATE tasks SET review_verdict=?, review_feedback=? WHERE id=?",
+                   (verdict, feedback, task_id))
+        DB.commit()
+    log_event(source, "review_result", {"task_id": task_id, "verdict": verdict, "source": source})
+
+    if verdict == "pass":
+        set_task_status(task_id, "done", completed=True)
+        await push_to_head({"type": "event", "event": "worker_task_reviewed", "task_id": task_id,
+                            "role": worker_role, "verdict": "pass", "source": source})
+        return
+
+    max_cycles = CFG.get("max_review_cycles", 3)
+    with LOCK:
+        DB.execute("UPDATE tasks SET review_cycles=review_cycles+1 WHERE id=?", (task_id,))
+        DB.commit()
+    if cycles + 1 >= max_cycles:
+        set_task_status(task_id, "review_stuck")
+        log_event(source, "review_stuck", {"task_id": task_id, "cycles": cycles + 1})
+        await push_to_head({"type": "event", "event": "review_stuck", "task_id": task_id,
+                            "role": worker_role, "feedback": feedback})
+    else:
+        set_task_status(task_id, "revising")
+        log_event(source, "review_fail_routed", {"task_id": task_id, "cycle": cycles + 1})
+        await _send_worker_frame(
+            worker_role, task_id,
+            "Reviewer did not pass this. Address the feedback below, then report done.\n\n" + feedback,
+            followup=True)
+
+
 async def on_review_result(frame: dict) -> None:
-    """Route a reviewer verdict (impl.md sec 3): pass -> done + wake Head;
-    fail -> feedback straight back into the same worker session, loop until pass
-    or the cycle cap; error -> tell Head (phase 5 adds the router re-route here)."""
+    """Route a reviewer verdict (impl.md sec 3): pass -> done + wake Head; fail ->
+    feedback into the same worker session, loop to the cycle cap; error -> if it's
+    a quota/rate-limit wall, re-route to the $550 router (impl.md sec 5), else
+    tell Head."""
     task_id = frame.get("task_id")
     verdict = frame.get("verdict")
-    feedback = frame.get("feedback") or ""
     row = DB.execute("SELECT role, review_cycles FROM tasks WHERE id=?", (task_id,)).fetchone()
     worker_role = row["role"] if row else None
     cycles = row["review_cycles"] if row else 0
 
-    with LOCK:
-        DB.execute("UPDATE tasks SET review_verdict=?, review_feedback=? WHERE id=?",
-                   (verdict, feedback or frame.get("detail"), task_id))
-        DB.commit()
-    log_event("reviewer", "review_result", {"task_id": task_id, "verdict": verdict})
-
-    if verdict == "pass":
-        set_task_status(task_id, "done", completed=True)
-        await push_to_head({"type": "event", "event": "worker_task_reviewed",
-                            "task_id": task_id, "role": worker_role, "verdict": "pass"})
+    if verdict in ("pass", "fail"):
+        await _apply_verdict(task_id, worker_role, cycles, verdict,
+                             frame.get("feedback") or "", source="reviewer")
         return
 
-    if verdict == "fail":
-        max_cycles = CFG.get("max_review_cycles", 3)
-        with LOCK:
-            DB.execute("UPDATE tasks SET review_cycles=review_cycles+1 WHERE id=?", (task_id,))
-            DB.commit()
-        if cycles + 1 >= max_cycles:
-            set_task_status(task_id, "review_stuck")
-            log_event("reviewer", "review_stuck", {"task_id": task_id, "cycles": cycles + 1})
-            await push_to_head({"type": "event", "event": "review_stuck", "task_id": task_id,
-                                "role": worker_role, "feedback": feedback})
-        else:
-            set_task_status(task_id, "revising")
-            log_event("reviewer", "review_fail_routed", {"task_id": task_id, "cycle": cycles + 1})
-            await _send_worker_frame(
-                worker_role, task_id,
-                "Reviewer did not pass this. Address the feedback below, then report done.\n\n" + feedback,
-                followup=True)
-        return
+    # verdict == "error": agy failed / unparseable / rate-limited
+    detail = frame.get("detail")
+    if frame.get("rate_limited") or router.is_quota_error(detail):
+        task = DB.execute("SELECT instruction_text FROM tasks WHERE id=?", (task_id,)).fetchone()
+        try:
+            rv = await asyncio.to_thread(
+                router.route_review,
+                task["instruction_text"] if task else "",
+                resolve_working_dir(worker_role) if worker_role else str(_BASE),
+                CFG.get("test_cmd", "python -m unittest"),
+            )
+            record_usage("router", None, rv.get("duration_ms"), "router_review")
+            log_event("router", "router_review_used", {"task_id": task_id, "verdict": rv["verdict"]})
+            await _apply_verdict(task_id, worker_role, cycles, rv["verdict"], rv["feedback"],
+                                 source="router")
+            return
+        except router.RouterUnconfigured:
+            log_event("router", "router_unconfigured", {"task_id": task_id})
+        except Exception as exc:  # noqa: BLE001
+            log_event("router", "router_review_failed", {"task_id": task_id, "error": repr(exc)})
 
-    # verdict == "error" (agy failed / unparseable / rate-limited)
     set_task_status(task_id, "review_error")
-    # PHASE 5 SEAM: re-route this review to the $550 router (Opus 5 / GPT-5.6 sol) here.
     await push_to_head({"type": "event", "event": "review_error", "task_id": task_id,
-                        "role": worker_role, "detail": frame.get("detail"),
+                        "role": worker_role, "detail": detail,
                         "rate_limited": frame.get("rate_limited", False)})
+
+
+async def on_docs_result(frame: dict) -> None:
+    """Docs finished. done -> mark task done + tell Head. Quota error -> re-route
+    to the router (impl.md sec 5): it returns full replacement markdown which the
+    coordinator writes to disk."""
+    task_id = frame.get("task_id")
+    outcome = frame.get("outcome")
+    files = frame.get("files_modified") or []
+
+    if outcome == "done":
+        set_task_status(task_id, "done", completed=True)
+        await push_to_head({"type": "event", "event": "docs_updated",
+                            "task_id": task_id, "files": files})
+        return
+
+    detail = frame.get("detail")
+    if frame.get("rate_limited") or router.is_quota_error(detail):
+        wd = Path(resolve_working_dir("docs")) if "docs" in CFG.get("roles", {}) else _BASE
+        current = {p.name: p.read_text(encoding="utf-8", errors="replace")
+                   for p in wd.glob("*.md")}
+        task = DB.execute("SELECT instruction_text FROM tasks WHERE id=?", (task_id,)).fetchone()
+        try:
+            rd = await asyncio.to_thread(router.route_docs,
+                                         task["instruction_text"] if task else "", current)
+            written = []
+            for name, text in rd["files"].items():
+                target = (wd / name).resolve()
+                if target.parent == wd.resolve() and target.suffix == ".md":
+                    target.write_text(text, encoding="utf-8")
+                    written.append(name)
+            record_usage("router", None, rd.get("duration_ms"), "router_docs")
+            log_event("router", "router_docs_used", {"task_id": task_id, "files": written})
+            set_task_status(task_id, "done", completed=True)
+            await push_to_head({"type": "event", "event": "docs_updated",
+                                "task_id": task_id, "files": written, "source": "router"})
+            return
+        except router.RouterUnconfigured:
+            log_event("router", "router_unconfigured", {"task_id": task_id})
+        except Exception as exc:  # noqa: BLE001
+            log_event("router", "router_docs_failed", {"task_id": task_id, "error": repr(exc)})
+
+    set_task_status(task_id, "docs_error")
+    await push_to_head({"type": "event", "event": "docs_error", "task_id": task_id,
+                        "detail": detail, "rate_limited": frame.get("rate_limited", False)})
 
 
 async def handle_frame(role: str, frame: dict) -> None:
@@ -272,6 +349,8 @@ async def handle_frame(role: str, frame: dict) -> None:
                      frame.get("call_type", "dispatch"))
         if role == "reviewer":
             await on_review_result(frame)
+        elif role == "docs":
+            await on_docs_result(frame)
         else:
             if frame.get("session_id"):
                 row = DB.execute("SELECT status FROM terminals WHERE role=?", (role,)).fetchone()

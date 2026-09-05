@@ -83,9 +83,10 @@ class ReviewRouting(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(coordinator.CONNS["head"].sent[0]["event"], "review_stuck")
         self.assertEqual(coordinator.CONNS["backend"].sent, [])  # no re-route at the cap
 
-    async def test_review_error_escalates_to_head(self):
+    async def test_review_error_escalates_to_head_when_router_unconfigured(self):
         coordinator.CONNS["head"] = FakeWS()
         coordinator.create_task("rt-6", "backend", "do X")
+        # .env is blank in tests -> router.route_review raises RouterUnconfigured
         await coordinator.on_review_result({"task_id": "rt-6", "verdict": "error",
                                             "detail": "agy 429", "rate_limited": True})
 
@@ -93,6 +94,25 @@ class ReviewRouting(unittest.IsolatedAsyncioTestCase):
         evt = coordinator.CONNS["head"].sent[0]
         self.assertEqual(evt["event"], "review_error")
         self.assertTrue(evt["rate_limited"])
+
+    async def test_rate_limited_review_error_uses_router_when_available(self):
+        coordinator.CONNS["head"] = FakeWS()
+        coordinator.create_task("rt-7", "backend", "do X")
+        orig = coordinator.router.route_review
+        coordinator.router.route_review = lambda instr, wd, tc: {
+            "verdict": "pass", "feedback": "router says ok", "source": "router",
+            "tokens": 10, "duration_ms": 5}
+        try:
+            await coordinator.on_review_result({"task_id": "rt-7", "verdict": "error",
+                                                "detail": "quota exceeded", "rate_limited": True})
+        finally:
+            coordinator.router.route_review = orig
+
+        self.assertEqual(task_row("rt-7")["status"], "done")
+        self.assertEqual(task_row("rt-7")["review_verdict"], "pass")
+        evt = coordinator.CONNS["head"].sent[0]
+        self.assertEqual(evt["event"], "worker_task_reviewed")
+        self.assertEqual(evt["source"], "router")
 
 
 if __name__ == "__main__":

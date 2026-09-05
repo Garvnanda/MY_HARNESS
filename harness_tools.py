@@ -39,7 +39,8 @@ def _safe(fn):
 
 @mcp.tool()
 def dispatch_task(role: str, instructions: str) -> str:
-    """Send a sub-task to a worker terminal (e.g. role="backend"). Returns the task id."""
+    """Send a sub-task to a worker terminal. role="backend" for code (auto-reviewed
+    when done); role="docs" to update repo markdown (not reviewed). Returns the task id."""
     def go():
         out = _post("/dispatch", {"role": role, "instructions": instructions})
         return f"dispatched to {role}: task_id={out['task_id']}"

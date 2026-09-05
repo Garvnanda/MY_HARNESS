@@ -45,11 +45,10 @@ def build_engine_cmd(engine: str, instructions: str, session_id: str | None = No
 
 
 def spawn_argv(argv: list[str]) -> list[str]:
-    """Resolve argv[0] on PATH; shim .cmd/.bat through cmd.exe (npm-style Windows shims)."""
-    exe = shutil.which(argv[0]) or argv[0]
-    if exe.lower().endswith((".cmd", ".bat")):
-        return ["cmd.exe", "/c", exe, *argv[1:]]
-    return [exe, *argv[1:]]
+    """Resolve argv[0] to its full path on PATH. On Windows, Python's subprocess
+    runs a resolved .CMD/.EXE directly; do NOT wrap .cmd in `cmd.exe /c` -- that
+    re-breaks on paths with spaces."""
+    return [shutil.which(argv[0]) or argv[0], *argv[1:]]
 
 
 def parse_result_line(result_obj: dict | None, returncode: int, stderr_text: str) -> dict:

@@ -53,8 +53,15 @@ def event_to_prompt(frame: dict) -> str:
                 f"worker with clearer instructions, cut the scope, or tell Garv.")
     if ev == "review_error":
         return (f"[harness event] the review of {role} task {task_id} could not run "
-                f"({frame.get('detail')}). Tell Garv; the reviewer's router fallback "
-                f"lands in phase 5.")
+                f"({frame.get('detail')}) and the router fallback did not resolve it. "
+                f"Tell Garv.")
+    if ev == "docs_updated":
+        src = " (via router fallback)" if frame.get("source") == "router" else ""
+        return (f"[harness event] Docs updated {frame.get('files')}{src} for task "
+                f"{task_id}. Decide the next step, or call flag_ready_to_commit.")
+    if ev == "docs_error":
+        return (f"[harness event] Docs could not update for task {task_id} "
+                f"({frame.get('detail')}). Tell Garv.")
     return f"[harness event] {json.dumps(frame, default=str)}"
 
 

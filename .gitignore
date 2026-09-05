@@ -6,3 +6,5 @@ harness_state.db-wal
 .venv/
 venv/
 demo/
+.env
+copilot_usage*.json

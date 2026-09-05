@@ -54,7 +54,15 @@ lists them. Run everything from the repo root.
   the coordinator routes feedback straight back into the same worker session (`--resume`)
   and loops up to `max_review_cycles` (default 3), then escalates `review_stuck` to Head.
   On `pass` it wakes Head with `worker_task_reviewed`.
-- **Head** (terminal 4): `python head.py` — the terminal Garv talks to. Type a line + enter;
+- **Docs** (terminal 4): `python docs.py` — engine `copilot` (`roles.docs.model`).
+  Head-dispatched only (`dispatch_task("docs", …)`); updates repo markdown. Does NOT
+  trigger the Reviewer. Reports `docs_updated` / `docs_error` to Head.
+- **Router fallback** (`router.py`, no terminal): when `agy` or `copilot` hits a
+  quota / rate-limit / billing wall, the coordinator re-routes that one pending task
+  to a direct chat-completions call (Opus 5 / GPT-5.6 sol only). Config in a
+  gitignored `.env` (copy `.env.example`, fill `ROUTER_*`). Blank `.env` → the
+  fallback logs `router_unconfigured` and escalates to Head, no regression.
+- **Head** (terminal 5): `python head.py` — the terminal Garv talks to. Type a line + enter;
   each line (or a coordinator-injected line/event) becomes one
   `claude -p --resume --mcp-config harness_tools.json` turn. MCP tools (`dispatch_task`,
   `check_worker_status`, `get_reviewer_feedback`, `flag_ready_to_commit`,
