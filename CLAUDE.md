@@ -38,8 +38,36 @@ HTTP/WebSocket, which works the same on this platform as anywhere else.
 
 ## Commands
 
-Not yet established — this is a from-scratch project with no scaffolding yet. Add build/test/
-run commands here as soon as they exist, so future sessions don't have to rediscover them.
+Python 3.11, deps already global (`fastapi`, `uvicorn`, `websockets`, `httpx`); `requirements.txt`
+lists them. Run everything from the repo root.
+
+- **Offline tests** (no network, no Claude quota): `python -m unittest discover -s tests -t .`
+- **Coordinator** (terminal 1): `python coordinator.py` — FastAPI on `127.0.0.1:8765`, creates
+  `harness_state.db`. Config from `HARNESS_CONFIG` env or `./project_config.json`.
+- **Backend worker** (terminal 2): `python worker.py backend` — connects to the coordinator,
+  runs its engine (`claude` by default; set `roles.backend.engine` to `fake` in
+  `project_config.json` for an offline dry run against `tools/fake_engine.py`).
+- **Reviewer** (terminal 3): `python reviewer.py` — engine `agy` (Gemini,
+  `roles.reviewer.model` in config). Fires automatically every time a worker marks a
+  sub-task `done` (hard coordinator rule, not a Head decision). Reads the change, runs
+  `test_cmd`, returns a `{verdict, feedback}` verdict via `agy --json-schema`. On `fail`
+  the coordinator routes feedback straight back into the same worker session (`--resume`)
+  and loops up to `max_review_cycles` (default 3), then escalates `review_stuck` to Head.
+  On `pass` it wakes Head with `worker_task_reviewed`.
+- **Head** (terminal 4): `python head.py` — the terminal Garv talks to. Type a line + enter;
+  each line (or a coordinator-injected line/event) becomes one
+  `claude -p --resume --mcp-config harness_tools.json` turn. MCP tools (`dispatch_task`,
+  `check_worker_status`, `get_reviewer_feedback`, `flag_ready_to_commit`,
+  `set_active_project`) live in `harness_tools.py`; `harness_tools.json` is the
+  `--mcp-config` file. Run Head from repo root so the relative path resolves.
+- **Talk to Head without the terminal** (e.g. from a script): `POST /head_say {"text": "..."}`.
+- **Low-level dispatch** (bypasses Head): `python tools/dispatch.py backend "<instructions>"`;
+  follow-up into the same session: `python tools/dispatch.py backend "<instructions>" <task_id>`.
+- **Inspect state**: `curl 127.0.0.1:8765/state` (terminals, tasks, `ready_to_commit`,
+  `head_connected`), `curl 127.0.0.1:8765/usage`, `curl 127.0.0.1:8765/tasks/<id>`, or
+  `sqlite3 harness_state.db "select * from event_log"`.
+
+Phase-2 demo workspace is `demo/` (gitignored); `project_config.json` points `backend` there.
 
 ## Git
 

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "harness": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["harness_tools.py"],
+      "env": { "HARNESS_COORDINATOR": "http://127.0.0.1:8765" }
+    }
+  }
+}

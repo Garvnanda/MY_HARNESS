@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": { "type": "string", "enum": ["pass", "fail"] },
+    "feedback": { "type": "string" }
+  },
+  "required": ["verdict", "feedback"],
+  "additionalProperties": false
+}

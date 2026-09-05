@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+harness_state.db
+harness_state.db-journal
+harness_state.db-wal
+.venv/
+venv/
+demo/
